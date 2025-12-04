@@ -302,13 +302,7 @@ HTML_TEMPLATE = """
         </div>
         
         <div id="inputSection" class="bg-gray-800 p-6 rounded-lg shadow-lg mb-8 border border-gray-700">
-            <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
-                <div>
-                    <label class="block text-xs font-bold text-gray-400 uppercase mb-1">OpenAI Key</label>
-                    <input type="password" id="apiKey" class="w-full bg-gray-900 border border-gray-600 rounded p-2 text-sm focus:border-blue-500 outline-none transition">
-                </div>
-            </div>
-            
+        
             <label class="block text-xs font-bold text-gray-400 uppercase mb-1">Input Data (JSON)</label>
             <textarea id="jsonInput" rows="6" class="w-full bg-gray-900 border border-gray-600 rounded p-3 font-mono text-xs text-green-400 focus:border-blue-500 outline-none" placeholder='{ "records": [...] }'></textarea>
             
