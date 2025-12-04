@@ -15,21 +15,35 @@ from langchain_core.output_parsers import StrOutputParser, JsonOutputParser
 app = Flask(__name__)
 
 # --- IN-MEMORY STATE ---
-# NOTE: On Railway, this persists as long as the deployment is running.
-# If you redeploy, this clears. For a simple tool, this is fine.
 jobs = {}
 
-# --- CONFIGURATION FROM ENV ---
+# --- CONFIGURATION ---
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY") 
 PERPLEXITY_API_KEY = os.environ.get("PERPLEXITY_API_KEY") 
 
+# --- HELPER: LOGGING ---
+def log_to_job(job_id, message, is_thought=False):
+    """
+    Appends messages to the log. 
+    If is_thought=True, it adds visual formatting for the 'brain dump'.
+    """
+    timestamp = datetime.now().strftime('%H:%M:%S')
+    if is_thought:
+        formatted_msg = f"\n[{timestamp}] 🧠 THINKING:\n{message}\n"
+    else:
+        formatted_msg = f"[{timestamp}] {message}"
+    
+    if job_id in jobs:
+        jobs[job_id]['logs'].append(formatted_msg)
+
 # --- STEP 1: COMPANY RESEARCH (Perplexity) ---
-def step_company_research(company_name):
-    """
-    Real call to Perplexity API for up-to-date research.
-    """
+def step_company_research(job_id, company_name):
+    log_to_job(job_id, f"🚀 Contacting Perplexity for live intel on {company_name}...")
+    
     if not PERPLEXITY_API_KEY:
-        return "Skipping Research: PERPLEXITY_API_KEY not set in Railway variables."
+        msg = "⚠️ Perplexity Key missing. Using generic knowledge."
+        log_to_job(job_id, msg)
+        return f"Generic analysis of {company_name} (API Key missing)."
 
     url = "https://api.perplexity.ai/chat/completions"
     payload = {
@@ -37,11 +51,11 @@ def step_company_research(company_name):
         "messages": [
             {
                 "role": "system",
-                "content": "You are a market researcher. Analyze the company comprehensively."
+                "content": "You are a senior market analyst. Be concise but specific."
             },
             {
                 "role": "user",
-                "content": f"Analyze {company_name}. Focus on: recent strategic shifts, financial performance, and key challenges/pain points."
+                "content": f"Research {company_name}. Return a summary of: 1. Recent Strategic Shifts (last 6 months). 2. Key Financial Challenges. 3. Current tech focus areas."
             }
         ]
     }
@@ -53,143 +67,164 @@ def step_company_research(company_name):
     try:
         response = requests.post(url, json=payload, headers=headers)
         response.raise_for_status()
-        return response.json()['choices'][0]['message']['content']
+        content = response.json()['choices'][0]['message']['content']
+        log_to_job(job_id, content, is_thought=True) # Log the full research
+        return content
     except Exception as e:
-        return f"Error querying Perplexity: {str(e)}"
+        log_to_job(job_id, f"❌ Perplexity Error: {e}")
+        return f"Error querying Perplexity."
 
 # --- STEP 2: ACCOUNT MAP ---
-def step_account_map(llm, company_research, prospects_json):
+def step_account_map(llm, job_id, company_research, prospects_json):
+    log_to_job(job_id, "🗺️ Mapping prospects to company challenges...")
+    
     prompt = ChatPromptTemplate.from_template(
-        """You are a Sales Director. 
+        """You are a Strategic Account Director.
         
-        COMPANY RESEARCH:
+        COMPANY INTELLIGENCE:
         {research}
         
-        PROSPECT LIST (JSON):
+        PROSPECT LIST:
         {prospects}
         
-        Task: Create an 'Account Map'. 
-        1. Identify the top 2-3 people from the list who are most relevant to the company's current challenges found in the research.
-        2. Explain briefly why you chose them.
+        Task: Select the top 1-2 people who can INFLUENCE the challenges found in the research.
+        Explain the 'Why' for each person based on their specific title/bio.
         
-        Return your answer as valid JSON with a list under the key 'selected_contacts'.
+        Return JSON with key 'selected_contacts'.
         """
     )
     chain = prompt | llm | JsonOutputParser()
-    return chain.invoke({"research": company_research, "prospects": json.dumps(prospects_json)})
+    result = chain.invoke({"research": company_research, "prospects": json.dumps(prospects_json)})
+    
+    # Log the thought process
+    log_to_job(job_id, json.dumps(result, indent=2), is_thought=True)
+    return result
 
-# --- STEP 3: ADAPT SIGNAL PROMPT ---
-def step_adapt_signal_prompt(llm, account_map):
+# --- STEP 3: STRICT SIGNAL ALIGNMENT (Anti-Hallucination) ---
+def step_signal_analysis(llm, job_id, account_map, prospects_full_data):
+    """
+    Instead of searching for new posts (which risks hallucination if no tool is present),
+    we strictly analyze the intersection of the User's Real Bio and the Company's Real Research.
+    """
+    log_to_job(job_id, "📡 Analying strict alignment signals (Anti-Hallucination Mode)...")
+    
     prompt = ChatPromptTemplate.from_template(
-        """Based on this Account Map: {account_map}
+        """You are a Fact-Based Researcher.
         
-        Generate a specific search query/prompt to find 'intent signals' (news, podcasts, posts) 
-        for these specific individuals.
+        TARGETS: {account_map}
+        FULL PROFILE DATA: {prospects_data}
+        
+        Task: For each selected contact, find a 'Hard Signal' of alignment.
+        
+        RULES:
+        1. DO NOT invent LinkedIn posts or webinars that didn't happen.
+        2. DO NOT say "They recently posted about X" unless it is in the data.
+        3. DO find the specific intersection between their STATED bio/summary and the company's research.
+        
+        Output the "Signal Strategy" for each person.
         """
     )
     chain = prompt | llm | StrOutputParser()
-    return chain.invoke({"account_map": str(account_map)})
+    result = chain.invoke({"account_map": str(account_map), "prospects_data": str(prospects_full_data)})
+    
+    log_to_job(job_id, result, is_thought=True)
+    return result
 
-# --- STEP 4: SIGNAL RESEARCH ---
-def step_signal_research(llm, adapted_prompt):
-    # If you have a specific tool for this (Tavily/Google), insert here.
-    # For now, we simulate the "Agent" thinking based on the prompt.
+# --- STEP 4: OUTREACH STRATEGY ---
+def step_outreach_strategy(llm, job_id, signals):
+    log_to_job(job_id, "♟️ Devising LinkedIn strategy...")
+    
     prompt = ChatPromptTemplate.from_template(
-        """You are a Signal Researcher. execute this task: {task}
+        """Based on these verified signals: 
+        {signals}
         
-        Simulate the findings. Invent realistic, high-relevance 'signals' 
-        (e.g., a recent webinar appearance, a LinkedIn post about AI, a quarterly earnings quote)
-        for the people identified.
+        Create a 'Hook Strategy' for a LinkedIn approach. 
+        How do we bridge the gap between their specific responsibility and our value?
         """
     )
     chain = prompt | llm | StrOutputParser()
-    return chain.invoke({"task": adapted_prompt})
+    result = chain.invoke({"signals": signals})
+    
+    log_to_job(job_id, result, is_thought=True)
+    return result
 
-# --- STEP 5: OUTREACH STRATEGY ---
-def step_outreach_strategy(llm, account_map, signals):
+# --- STEP 5: LINKEDIN WRITING ---
+def step_write_linkedin(llm, job_id, strategy, account_map):
+    log_to_job(job_id, "✍️ Drafting LinkedIn Messages...")
+    
     prompt = ChatPromptTemplate.from_template(
-        """Based on Account Map: {account_map}
-        And Research Signals: {signals}
+        """
+        CONTEXT: {strategy}
+        TARGETS: {account_map}
         
-        Create a high-level 'Outreach Strategy'. 
-        What is the hook? What is the value proposition?
+        Task: Write 2 LinkedIn messages for each target.
+        
+        Format 1: CONNECTION REQUEST
+        - STRICT LIMIT: Under 300 characters (including spaces).
+        - No fluff. Contextual.
+        
+        Format 2: INMAIL / FOLLOW-UP
+        - Subject Line (if InMail)
+        - Body: Casual, mobile-friendly, professional.
+        
+        Output plainly formatted text.
         """
     )
     chain = prompt | llm | StrOutputParser()
-    return chain.invoke({"account_map": str(account_map), "signals": signals})
-
-# --- STEP 6: PERSONALIZATION ---
-def step_personalize_messages(llm, strategy, account_map):
-    prompt = ChatPromptTemplate.from_template(
-        """Based on Strategy: {strategy}
-        And contacts in: {account_map}
-        
-        Write a hyper-personalized cold email for each selected contact.
-        """
-    )
-    chain = prompt | llm | StrOutputParser()
-    return chain.invoke({"strategy": strategy, "account_map": str(account_map)})
+    result = chain.invoke({"strategy": strategy, "account_map": str(account_map)})
+    
+    log_to_job(job_id, result, is_thought=True)
+    return result
 
 # --- WORKER THREAD ---
 def process_workflow(job_id, input_data):
     job = jobs[job_id]
     
     try:
-        # Use key provided by user UI, fallback to Env Var
         user_api_key = input_data.get('openai_api_key')
         api_key = user_api_key if user_api_key else OPENAI_API_KEY
         
         if not api_key:
-            raise ValueError("No OpenAI API Key provided.")
+            log_to_job(job_id, "❌ Critical: No OpenAI API Key found.")
+            job['status'] = "failed"
+            return
 
-        llm = ChatOpenAI(model="gpt-4o", api_key=api_key, temperature=0)
+        llm = ChatOpenAI(model="gpt-4o", api_key=api_key, temperature=0.0) # Temp 0 reduces hallucinations
         
         records = input_data['input_json'].get('records', [])
-        company_name = records[0].get('companyName', "Unknown Company") if records else "Unknown Company"
+        if not records:
+             raise ValueError("No records found in JSON")
+             
+        company_name = records[0].get('companyName', "Unknown Company")
 
-        # --- STEP 1 ---
-        job['logs'].append(f"[{datetime.now().strftime('%H:%M:%S')}] 🚀 Starting Company Research (Perplexity) for {company_name}...")
+        # 1. Research
         job['step'] = 1
-        research_output = step_company_research(company_name)
-        job['logs'].append(f"✅ Research Complete.")
+        research_output = step_company_research(job_id, company_name)
         
-        # --- STEP 2 ---
-        job['logs'].append(f"[{datetime.now().strftime('%H:%M:%S')}] 🗺️ Building Account Map...")
+        # 2. Map
         job['step'] = 2
-        account_map = step_account_map(llm, research_output, records)
-        job['logs'].append(f"✅ Account Map Created: Selected {len(account_map.get('selected_contacts', []))} key contacts.")
+        account_map = step_account_map(llm, job_id, research_output, records)
 
-        # --- STEP 3 ---
-        job['logs'].append(f"[{datetime.now().strftime('%H:%M:%S')}] 🔧 Adapting Research Prompts...")
+        # 3. Signals (Strict)
         job['step'] = 3
-        signal_prompt = step_adapt_signal_prompt(llm, account_map)
-        job['logs'].append(f"✅ Prompts Adapted.")
+        signals = step_signal_analysis(llm, job_id, account_map, records)
 
-        # --- STEP 4 ---
-        job['logs'].append(f"[{datetime.now().strftime('%H:%M:%S')}] 📡 Hunting for Signals...")
+        # 4. Strategy
         job['step'] = 4
-        signals = step_signal_research(llm, signal_prompt)
-        job['logs'].append(f"✅ Signals Found.")
+        strategy = step_outreach_strategy(llm, job_id, signals)
 
-        # --- STEP 5 ---
-        job['logs'].append(f"[{datetime.now().strftime('%H:%M:%S')}] ♟️ Developing Outreach Strategy...")
+        # 5. Writing
         job['step'] = 5
-        strategy = step_outreach_strategy(llm, account_map, signals)
-        job['logs'].append(f"✅ Strategy Defined.")
+        final_copy = step_write_linkedin(llm, job_id, strategy, account_map)
 
-        # --- STEP 6 ---
-        job['logs'].append(f"[{datetime.now().strftime('%H:%M:%S')}] ✍️ Writing Personalizations...")
-        job['step'] = 6
-        final_emails = step_personalize_messages(llm, strategy, account_map)
-        job['logs'].append(f"✅ Emails Generated.")
-
-        job['result'] = final_emails
+        job['result'] = final_copy
         job['status'] = "completed"
         job['progress'] = 100
+        log_to_job(job_id, "✅ Workflow Finished Successfully.")
 
     except Exception as e:
         job['status'] = "failed"
-        job['logs'].append(f"❌ Error: {str(e)}")
+        log_to_job(job_id, f"❌ Workflow Crash: {str(e)}")
         print(f"Error in job {job_id}: {e}")
 
 # --- API ROUTES ---
@@ -209,7 +244,7 @@ def start_job():
         "logs": [],
         "result": None,
         "step": 0,
-        "total_steps": 6,
+        "total_steps": 5,
         "progress": 0
     }
     
@@ -240,70 +275,68 @@ HTML_TEMPLATE = """
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Railway Sales Agent</title>
+    <title>LinkedIn Agent</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
-        .log-entry { font-family: monospace; font-size: 0.9em; border-bottom: 1px solid #eee; padding: 4px 0; }
-        .blink { animation: blinker 1.5s linear infinite; }
+        .log-entry { 
+            font-family: 'Courier New', monospace; 
+            font-size: 0.85em; 
+            border-bottom: 1px solid #333; 
+            padding: 8px 0; 
+            white-space: pre-wrap; /* Keeps formatting */
+        }
+        .blink { animation: blinker 1s linear infinite; }
         @keyframes blinker { 50% { opacity: 0; } }
+        /* Custom Scrollbar */
+        ::-webkit-scrollbar { width: 8px; }
+        ::-webkit-scrollbar-track { background: #1a1a1a; }
+        ::-webkit-scrollbar-thumb { background: #4a4a4a; border-radius: 4px; }
     </style>
 </head>
-<body class="bg-gray-100 p-6 md:p-12">
+<body class="bg-gray-900 text-gray-100 p-6 font-sans">
 
-    <div class="max-w-5xl mx-auto bg-white p-8 rounded-xl shadow-lg border border-gray-200">
+    <div class="max-w-6xl mx-auto">
         <div class="flex items-center justify-between mb-8">
-            <h1 class="text-3xl font-bold text-gray-800">🕵️‍♂️ Account Intelligence Agent</h1>
-            <span class="bg-purple-100 text-purple-800 text-xs font-semibold px-2.5 py-0.5 rounded">Running on Railway</span>
+            <h1 class="text-3xl font-bold text-blue-400">🔗 Autonomous LinkedIn Agent</h1>
+            <div id="statusBadge" class="bg-gray-800 text-gray-400 text-xs px-3 py-1 rounded-full uppercase tracking-wider">Idle</div>
         </div>
         
-        <div id="inputSection" class="transition-all duration-300">
+        <div id="inputSection" class="bg-gray-800 p-6 rounded-lg shadow-lg mb-8 border border-gray-700">
             <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
                 <div>
-                    <label class="block text-sm font-medium text-gray-700 mb-1">OpenAI API Key</label>
-                    <input type="password" id="apiKey" class="w-full p-3 border rounded-lg bg-gray-50 focus:ring-2 focus:ring-purple-500 outline-none" placeholder="sk-...">
-                    <p class="text-xs text-gray-500 mt-1">Leave empty if set in Railway Variables</p>
+                    <label class="block text-xs font-bold text-gray-400 uppercase mb-1">OpenAI Key</label>
+                    <input type="password" id="apiKey" class="w-full bg-gray-900 border border-gray-600 rounded p-2 text-sm focus:border-blue-500 outline-none transition">
                 </div>
             </div>
             
-            <label class="block text-sm font-medium text-gray-700 mb-2">Input Data (JSON)</label>
-            <textarea id="jsonInput" rows="8" class="w-full p-3 border rounded-lg bg-gray-50 font-mono text-xs focus:ring-2 focus:ring-purple-500 outline-none" placeholder="Paste your records JSON here..."></textarea>
+            <label class="block text-xs font-bold text-gray-400 uppercase mb-1">Input Data (JSON)</label>
+            <textarea id="jsonInput" rows="6" class="w-full bg-gray-900 border border-gray-600 rounded p-3 font-mono text-xs text-green-400 focus:border-blue-500 outline-none" placeholder='{ "records": [...] }'></textarea>
             
-            <button onclick="startJob()" class="mt-6 w-full bg-purple-600 text-white font-semibold px-6 py-3 rounded-lg hover:bg-purple-700 transition shadow-md">
-                Start Agent Workflow
+            <button onclick="startJob()" class="mt-4 bg-blue-600 hover:bg-blue-500 text-white font-bold py-2 px-6 rounded transition w-full md:w-auto">
+                Launch Agent
             </button>
         </div>
 
-        <div id="trackingSection" class="hidden mt-8">
-            <div class="mb-6">
-                <div class="flex justify-between items-center mb-2">
-                    <span class="text-sm font-bold text-purple-700 tracking-wider" id="statusText">INITIALIZING...</span>
-                    <span class="text-sm font-bold text-gray-600" id="pctText">0%</span>
+        <div id="trackingSection" class="hidden grid grid-cols-1 lg:grid-cols-2 gap-6 h-[600px]">
+            
+            <div class="flex flex-col bg-black rounded-lg border border-gray-700 shadow-xl overflow-hidden">
+                <div class="bg-gray-800 px-4 py-2 border-b border-gray-700 flex justify-between items-center">
+                    <span class="text-xs font-bold text-gray-400 uppercase">⚡ Agent Chain of Thought</span>
+                    <span id="pctText" class="text-xs text-blue-400">0%</span>
                 </div>
-                <div class="w-full bg-gray-200 rounded-full h-3 overflow-hidden">
-                    <div id="progressBar" class="bg-purple-600 h-3 rounded-full transition-all duration-500 ease-out" style="width: 0%"></div>
+                <div id="logsContainer" class="flex-1 p-4 overflow-y-auto text-green-500 font-mono text-xs leading-relaxed">
+                    </div>
+            </div>
+            
+            <div class="flex flex-col bg-white rounded-lg border border-gray-700 shadow-xl overflow-hidden">
+                <div class="bg-gray-200 px-4 py-2 border-b border-gray-300">
+                    <span class="text-xs font-bold text-gray-600 uppercase">📝 Generated Messages</span>
+                </div>
+                <div id="resultContainer" class="flex-1 p-6 overflow-y-auto text-gray-800 font-sans text-sm whitespace-pre-wrap">
+                    <p class="text-gray-400 italic text-center mt-20">Output will appear here upon completion...</p>
                 </div>
             </div>
 
-            <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                <div class="flex flex-col h-96">
-                    <h3 class="text-xs font-bold text-gray-500 uppercase mb-2">Agent Thoughts (Logs)</h3>
-                    <div class="flex-1 border border-gray-300 rounded-lg p-4 overflow-y-auto bg-black text-green-400 shadow-inner font-mono text-xs">
-                        <div id="logsContainer"></div>
-                        <div id="cursor" class="blink mt-1">_</div>
-                    </div>
-                </div>
-                
-                <div class="flex flex-col h-96">
-                    <h3 class="text-xs font-bold text-gray-500 uppercase mb-2">Generated Outreach</h3>
-                    <div class="flex-1 border border-gray-300 rounded-lg p-4 overflow-y-auto bg-gray-50 shadow-inner">
-                        <pre id="resultContainer" class="text-xs whitespace-pre-wrap text-gray-700 font-mono">Results will appear here...</pre>
-                    </div>
-                </div>
-            </div>
-            
-            <button onclick="location.reload()" id="resetBtn" class="hidden mt-6 w-full bg-gray-200 text-gray-800 font-semibold px-6 py-3 rounded-lg hover:bg-gray-300 transition">
-                Start New Search
-            </button>
         </div>
     </div>
 
@@ -316,63 +349,58 @@ HTML_TEMPLATE = """
             const jsonText = document.getElementById('jsonInput').value;
             
             try {
-                const parsedJson = JSON.parse(jsonText);
+                JSON.parse(jsonText); // Validate JSON
                 
                 const response = await fetch('/api/start', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify({
                         openai_api_key: apiKey,
-                        input_json: parsedJson
+                        input_json: JSON.parse(jsonText)
                     })
                 });
                 
                 const data = await response.json();
                 currentJobId = data.job_id;
                 
-                document.getElementById('inputSection').classList.add('hidden');
+                document.getElementById('inputSection').classList.add('opacity-50', 'pointer-events-none');
                 document.getElementById('trackingSection').classList.remove('hidden');
+                document.getElementById('statusBadge').innerText = "RUNNING";
+                document.getElementById('statusBadge').className = "bg-blue-900 text-blue-200 text-xs px-3 py-1 rounded-full uppercase tracking-wider blink";
                 
-                pollInterval = setInterval(checkStatus, 1500);
+                pollInterval = setInterval(checkStatus, 1000); // Poll every 1s
                 
             } catch (e) {
-                alert("Invalid JSON! Please check your input.");
+                alert("Invalid JSON data. Please check syntax.");
             }
         }
 
         async function checkStatus() {
             if (!currentJobId) return;
             
-            try {
-                const response = await fetch(`/api/status/${currentJobId}`);
-                if (!response.ok) return;
-                
-                const data = await response.json();
-                
-                document.getElementById('progressBar').style.width = data.progress + "%";
-                document.getElementById('pctText').innerText = data.progress + "%";
-                document.getElementById('statusText').innerText = data.status.toUpperCase();
-                
-                const logsHtml = data.logs.map(log => `<div class="log-entry">${log}</div>`).join('');
-                document.getElementById('logsContainer').innerHTML = logsHtml;
-                
-                const logContainer = document.getElementById('logsContainer').parentElement;
-                logContainer.scrollTop = logContainer.scrollHeight;
+            const response = await fetch(`/api/status/${currentJobId}`);
+            const data = await response.json();
+            
+            // Update percentage
+            document.getElementById('pctText').innerText = data.progress + "%";
+            
+            // Render Logs (The "Brain")
+            // We join them differently to handle the newlines in thoughts
+            const logsContainer = document.getElementById('logsContainer');
+            logsContainer.innerHTML = data.logs.join(""); 
+            logsContainer.scrollTop = logsContainer.scrollHeight;
 
-                if (data.status === 'completed') {
-                    clearInterval(pollInterval);
-                    document.getElementById('resultContainer').innerText = data.result;
-                    document.getElementById('statusText').innerText = "✅ CAMPAIGN READY";
-                    document.getElementById('statusText').classList.replace('text-purple-700', 'text-green-600');
-                    document.getElementById('resetBtn').classList.remove('hidden');
-                } else if (data.status === 'failed') {
-                    clearInterval(pollInterval);
-                    document.getElementById('statusText').innerText = "❌ PROCESS FAILED";
-                    document.getElementById('statusText').classList.replace('text-purple-700', 'text-red-600');
-                    document.getElementById('resetBtn').classList.remove('hidden');
-                }
-            } catch (e) {
-                console.error("Polling error", e);
+            if (data.status === 'completed') {
+                clearInterval(pollInterval);
+                document.getElementById('resultContainer').innerText = data.result;
+                document.getElementById('statusBadge').innerText = "COMPLETE";
+                document.getElementById('statusBadge').className = "bg-green-900 text-green-200 text-xs px-3 py-1 rounded-full uppercase tracking-wider";
+                document.getElementById('inputSection').classList.remove('opacity-50', 'pointer-events-none');
+            } else if (data.status === 'failed') {
+                clearInterval(pollInterval);
+                document.getElementById('statusBadge').innerText = "FAILED";
+                document.getElementById('statusBadge').className = "bg-red-900 text-red-200 text-xs px-3 py-1 rounded-full uppercase tracking-wider";
+                document.getElementById('inputSection').classList.remove('opacity-50', 'pointer-events-none');
             }
         }
     </script>
@@ -381,6 +409,5 @@ HTML_TEMPLATE = """
 """
 
 if __name__ == '__main__':
-    # Local development entry point
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port)
