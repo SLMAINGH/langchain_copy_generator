@@ -18,6 +18,7 @@ app = Flask(__name__)
 jobs = {}
 
 # --- CONFIGURATION ---
+# The code now strictly requires these to be in your environment variables
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY") 
 PERPLEXITY_API_KEY = os.environ.get("PERPLEXITY_API_KEY") 
 
@@ -25,13 +26,15 @@ PERPLEXITY_API_KEY = os.environ.get("PERPLEXITY_API_KEY")
 def log_to_job(job_id, message, is_thought=False):
     """
     Appends messages to the log. 
-    If is_thought=True, it adds visual formatting for the 'brain dump'.
     """
     timestamp = datetime.now().strftime('%H:%M:%S')
+    
+    # We add distinct formatting markers for the frontend to render nicely
     if is_thought:
-        formatted_msg = f"\n[{timestamp}] 🧠 THINKING:\n{message}\n"
+        # Extra newlines and a visual separator for heavy reasoning/JSON
+        formatted_msg = f"\n<span class='text-blue-400'>[{timestamp}] 🧠 REASONING:</span>\n<span class='text-gray-300'>{message}</span>\n"
     else:
-        formatted_msg = f"[{timestamp}] {message}"
+        formatted_msg = f"\n<span class='text-green-500'>[{timestamp}] ℹ️ SYSTEM:</span> {message}"
     
     if job_id in jobs:
         jobs[job_id]['logs'].append(formatted_msg)
@@ -96,17 +99,13 @@ def step_account_map(llm, job_id, company_research, prospects_json):
     chain = prompt | llm | JsonOutputParser()
     result = chain.invoke({"research": company_research, "prospects": json.dumps(prospects_json)})
     
-    # Log the thought process
+    # Log the thought process (JSON DUMP)
     log_to_job(job_id, json.dumps(result, indent=2), is_thought=True)
     return result
 
-# --- STEP 3: STRICT SIGNAL ALIGNMENT (Anti-Hallucination) ---
+# --- STEP 3: STRICT SIGNAL ALIGNMENT ---
 def step_signal_analysis(llm, job_id, account_map, prospects_full_data):
-    """
-    Instead of searching for new posts (which risks hallucination if no tool is present),
-    we strictly analyze the intersection of the User's Real Bio and the Company's Real Research.
-    """
-    log_to_job(job_id, "📡 Analying strict alignment signals (Anti-Hallucination Mode)...")
+    log_to_job(job_id, "📡 Analyzing strict alignment signals (Anti-Hallucination Mode)...")
     
     prompt = ChatPromptTemplate.from_template(
         """You are a Fact-Based Researcher.
@@ -181,15 +180,13 @@ def process_workflow(job_id, input_data):
     job = jobs[job_id]
     
     try:
-        user_api_key = input_data.get('openai_api_key')
-        api_key = user_api_key if user_api_key else OPENAI_API_KEY
-        
-        if not api_key:
-            log_to_job(job_id, "❌ Critical: No OpenAI API Key found.")
+        # REMOVED: User input API Key logic. Strictly uses Env Var now.
+        if not OPENAI_API_KEY:
+            log_to_job(job_id, "❌ Critical: OPENAI_API_KEY environment variable not found.")
             job['status'] = "failed"
             return
 
-        llm = ChatOpenAI(model="gpt-4o", api_key=api_key, temperature=0.0) # Temp 0 reduces hallucinations
+        llm = ChatOpenAI(model="gpt-4o", api_key=OPENAI_API_KEY, temperature=0.0)
         
         records = input_data['input_json'].get('records', [])
         if not records:
@@ -278,15 +275,16 @@ HTML_TEMPLATE = """
     <title>LinkedIn Agent</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
-        .log-entry { 
+        /* This ensures the JSON reasoning is readable and scrolls like a terminal */
+        .log-container { 
             font-family: 'Courier New', monospace; 
-            font-size: 0.85em; 
-            border-bottom: 1px solid #333; 
-            padding: 8px 0; 
-            white-space: pre-wrap; /* Keeps formatting */
+            font-size: 0.8em; 
+            white-space: pre-wrap; /* Crucial for displaying JSON indentation */
+            word-wrap: break-word;
         }
         .blink { animation: blinker 1s linear infinite; }
         @keyframes blinker { 50% { opacity: 0; } }
+        
         /* Custom Scrollbar */
         ::-webkit-scrollbar { width: 8px; }
         ::-webkit-scrollbar-track { background: #1a1a1a; }
@@ -303,22 +301,22 @@ HTML_TEMPLATE = """
         
         <div id="inputSection" class="bg-gray-800 p-6 rounded-lg shadow-lg mb-8 border border-gray-700">
         
-            <label class="block text-xs font-bold text-gray-400 uppercase mb-1">Input Data (JSON)</label>
-            <textarea id="jsonInput" rows="6" class="w-full bg-gray-900 border border-gray-600 rounded p-3 font-mono text-xs text-green-400 focus:border-blue-500 outline-none" placeholder='{ "records": [...] }'></textarea>
+            <label class="block text-xs font-bold text-gray-400 uppercase mb-2">Target Data (JSON)</label>
+            <textarea id="jsonInput" rows="6" class="w-full bg-gray-900 border border-gray-600 rounded p-3 font-mono text-xs text-green-400 focus:border-blue-500 outline-none" placeholder='{ "records": [{ "companyName": "Acme Inc", "firstName": "John", ... }] }'></textarea>
             
             <button onclick="startJob()" class="mt-4 bg-blue-600 hover:bg-blue-500 text-white font-bold py-2 px-6 rounded transition w-full md:w-auto">
                 Launch Agent
             </button>
         </div>
 
-        <div id="trackingSection" class="hidden grid grid-cols-1 lg:grid-cols-2 gap-6 h-[600px]">
+        <div id="trackingSection" class="hidden grid grid-cols-1 lg:grid-cols-2 gap-6 h-[650px]">
             
             <div class="flex flex-col bg-black rounded-lg border border-gray-700 shadow-xl overflow-hidden">
                 <div class="bg-gray-800 px-4 py-2 border-b border-gray-700 flex justify-between items-center">
                     <span class="text-xs font-bold text-gray-400 uppercase">⚡ Agent Chain of Thought</span>
                     <span id="pctText" class="text-xs text-blue-400">0%</span>
                 </div>
-                <div id="logsContainer" class="flex-1 p-4 overflow-y-auto text-green-500 font-mono text-xs leading-relaxed">
+                <div id="logsContainer" class="log-container flex-1 p-4 overflow-y-auto leading-relaxed text-gray-300">
                     </div>
             </div>
             
@@ -339,28 +337,29 @@ HTML_TEMPLATE = """
         let pollInterval = null;
 
         async function startJob() {
-            const apiKey = document.getElementById('apiKey').value;
             const jsonText = document.getElementById('jsonInput').value;
             
             try {
-                JSON.parse(jsonText); // Validate JSON
+                // Quick client-side validation
+                const parsedJson = JSON.parse(jsonText); 
                 
                 const response = await fetch('/api/start', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify({
-                        openai_api_key: apiKey,
-                        input_json: JSON.parse(jsonText)
+                        input_json: parsedJson
                     })
                 });
                 
                 const data = await response.json();
                 currentJobId = data.job_id;
                 
+                // UI Updates
                 document.getElementById('inputSection').classList.add('opacity-50', 'pointer-events-none');
                 document.getElementById('trackingSection').classList.remove('hidden');
                 document.getElementById('statusBadge').innerText = "RUNNING";
                 document.getElementById('statusBadge').className = "bg-blue-900 text-blue-200 text-xs px-3 py-1 rounded-full uppercase tracking-wider blink";
+                document.getElementById('logsContainer').innerHTML = ""; // Clear previous logs
                 
                 pollInterval = setInterval(checkStatus, 1000); // Poll every 1s
                 
@@ -379,9 +378,12 @@ HTML_TEMPLATE = """
             document.getElementById('pctText').innerText = data.progress + "%";
             
             // Render Logs (The "Brain")
-            // We join them differently to handle the newlines in thoughts
             const logsContainer = document.getElementById('logsContainer');
+            
+            // Since the backend now sends HTML strings for color, we use innerHTML
             logsContainer.innerHTML = data.logs.join(""); 
+            
+            // Auto-scroll to bottom
             logsContainer.scrollTop = logsContainer.scrollHeight;
 
             if (data.status === 'completed') {
