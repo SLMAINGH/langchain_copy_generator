@@ -1,0 +1,7 @@
+flask
+gunicorn
+langchain
+langchain-openai
+langchain-community
+requests
+uuid
