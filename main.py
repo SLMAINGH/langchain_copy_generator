@@ -50,7 +50,7 @@ def step_company_research(job_id, company_name):
 
     url = "https://api.perplexity.ai/chat/completions"
     payload = {
-        "model": "llama-3.1-sonar-small-128k-online",
+        "model": "sonar-pro",
         "messages": [
             {
                 "role": "system",
