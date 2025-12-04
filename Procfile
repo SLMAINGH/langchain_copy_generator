@@ -1,1 +1,1 @@
-web: gunicorn app:app --workers 1 --threads 8 --timeout 600 --access-logfile -
+web: gunicorn main:app --workers 1 --threads 8 --timeout 600 --access-logfile -
